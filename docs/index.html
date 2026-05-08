@@ -1,0 +1,178 @@
+<!doctype html>
+
+<html lang="en">
+<head>
+<meta charset="utf-8"/>
+<meta content="width=device-width, initial-scale=1" name="viewport"/>
+<title>When Stock Graphs Fail: Diagnosing WIRE Graph Transformers</title>
+<style>
+    :root{
+      --ink:#17202a; --muted:#5d6d7e; --line:#d6dbdf; --accent:#1f618d;
+      --soft:#f6f8fa; --soft2:#eef6fb; --warn:#fff8ef;
+    }
+    *{box-sizing:border-box}
+    body{margin:0;background:#ffffff;color:var(--ink);font:18px/1.65 Georgia, 'Times New Roman', serif;}
+    header{background:linear-gradient(135deg,#102a43,#1f618d);color:white;padding:70px 24px 56px;border-bottom:8px solid #d6eaf8;}
+    .wrap{max-width:1050px;margin:0 auto;padding:0 22px;}
+    h1{font-family:Arial, sans-serif;font-size:46px;line-height:1.08;margin:0 0 18px;font-weight:800;letter-spacing:-0.03em;}
+    .subtitle{font-family:Arial, sans-serif;font-size:22px;line-height:1.45;max-width:920px;opacity:.94;margin:0 0 20px;}
+    .byline{font-family:Arial, sans-serif;color:#dfeef7;font-size:16px;margin-top:18px;}
+    main{padding:42px 0 70px;}
+    h2{font-family:Arial, sans-serif;font-size:30px;line-height:1.25;margin:46px 0 14px;border-top:1px solid var(--line);padding-top:28px;letter-spacing:-0.01em;}
+    h3{font-family:Arial, sans-serif;font-size:22px;line-height:1.3;margin:28px 0 10px;color:#1f4e79;}
+    p{margin:0 0 17px;}
+    a{color:var(--accent);}
+    .abstract{background:var(--soft2);border-left:6px solid var(--accent);padding:20px 24px;margin:0 0 34px;font-family:Arial, sans-serif;line-height:1.58;}
+    .takeaway{background:var(--warn);border-left:6px solid #d68910;padding:16px 20px;margin:24px 0;font-family:Arial, sans-serif;}
+    figure{margin:32px 0 36px;padding:0;}
+    figure img, figure svg{width:100%;height:auto;border:1px solid var(--line);background:white;display:block;}
+    figcaption{font-family:Arial, sans-serif;font-size:15px;line-height:1.45;color:var(--muted);margin-top:10px;}
+    table{width:100%;border-collapse:collapse;margin:22px 0 30px;font-family:Arial, sans-serif;font-size:15px;line-height:1.35;}
+    th,td{border:1px solid var(--line);padding:10px 12px;text-align:left;vertical-align:top;}
+    th{background:#edf3f8;color:#17202a;}
+    td.num{text-align:right;font-variant-numeric:tabular-nums;}
+    .formula{font-family:'Courier New', monospace;background:var(--soft);border:1px solid var(--line);padding:12px 14px;margin:18px 0;overflow:auto;}
+    .refs{font-size:16px;line-height:1.5;}
+    .refs p{margin-bottom:10px;}
+    .note{font-family:Arial, sans-serif;font-size:15px;color:var(--muted);}
+    .grid{display:grid;grid-template-columns:1fr 1fr;gap:18px;}
+    @media(max-width:760px){h1{font-size:34px}.grid{grid-template-columns:1fr}body{font-size:17px}}
+  </style>
+</head>
+<body>
+<header>
+<div class="wrap">
+<h1>When Stock Graphs Fail</h1>
+<p class="subtitle">Diagnosing WIRE graph transformers for short-horizon cross-sectional stock ranking</p>
+<p class="byline">By Weihang Huang, with contributions from Astrid Teo</p>
+<p class="byline">STAT 3106 Applied Machine Learning · Spring 2026</p>
+<p class="byline">Instructor: Prof. Bianca M. Dumitrascu · TA: Yizi Zhang</p>
+<p class="byline">Code: <a href="https://github.com/Ry3n-Huang/wire-graph-transformer" style="color:#dfeef7;text-decoration:underline;">github.com/Ry3n-Huang/wire-graph-transformer</a></p>
+</div>
+</header>
+<main class="wrap">
+<section class="abstract"><strong>Summary.</strong> The project starts from a basic observation: stocks are related to each other, so a model may benefit from using stock relationships. WIRE is a graph-aware Transformer layer that turns spectral coordinates from stock relationship graphs into rotary attention encodings. The results did not support this assumption. A dense Pearson-correlation graph performed slightly better than the LSTM, but the difference was not statistically significant. The more interpretable graphs—sector membership, TNIC competitors, and 13F ownership overlap—made the model worse. The main value of the project is the diagnosis of this result: in this task, the graph did not add useful information and often added noise.</section>
+<h2>1. Why this question matters</h2>
+<p>A stock rarely moves for reasons that belong only to that stock. Banks move with rates, chipmakers move with the semiconductor cycle, and firms with the same large holders can be hit by the same flow-of-funds pressure. A model that looks only at one ticker at a time misses some of that context.</p>
+<p>The hypothesis was straightforward: <em>if economically meaningful relationships are encoded as a graph, then a Transformer should be able to use that graph to improve short-horizon cross-sectional stock ranking.</em> The task is ranking rather than price forecasting. On each day, the model predicts which of 300 stocks will have the better five-day forward return, not whether the market as a whole goes up or down.</p>
+<p>The experiments did not support the original hypothesis. Correlation-based WIRE sometimes helped, but the improvement was not stable. Fundamental WIRE—the version intended as the main contribution—lost to an LSTM. The analysis therefore focuses on whether the graph itself caused the problem.</p>
+<figure>
+<img alt="WIRE architecture diagram" src="figures/figure1_architecture.svg"/>
+<figcaption><strong>Figure 1.</strong> WIRE architecture. A shared LSTM encodes each stock's 20-day history. Spectral coordinates from relationship graphs are then used to rotate query/key vectors inside the attention layer.</figcaption>
+</figure>
+<h2>2. Related work, and the unresolved question</h2>
+<p>Graph models are not new in stock prediction. Feng et al. used sector and supply-chain relations for temporal relational ranking [1]. Chen et al. studied relational stock ranking with graph neural networks [2]. Sawhney et al. combined temporal attention with graph or hypergraph structure [3]. The closest baseline for us is Li's Differential Graph Transformer, which builds a dynamic graph from Pearson correlations and uses differential attention to reduce noise [4].</p>
+<p>These papers provide relevant baselines, but many of them treat the graph as if it were already the right object. The architecture gets careful attention; the choice of graph receives less pressure. This project makes that choice part of the experiment. Are sector, competition, and ownership graphs actually helpful for predicting five-day return ranks, or do they only appear valid from an economic perspective?</p>
+<p>The positional-encoding idea comes from another line of work. Laplacian eigenvectors have been used as graph positional encodings [5]. RoPE rotates query and key vectors to encode position in Transformers [6]. SignNet points out that spectral representations have sign and basis ambiguities that cannot be ignored [7]. WIRE sits between these ideas: it uses graph spectral coordinates to induce RoPE-style rotations. The difference from DGT is the graph choice: three fundamental graphs rather than one statistical correlation graph.</p>
+<h2>3. The machine learning task</h2>
+<p>Each sample is one trading day. The input is a 300-stock cross-section, with a 20-day lookback window and 25 model features per stock. The raw close price is kept for target construction, but it is not treated as an ordinary predictive feature.</p>
+<div class="formula">Input: x ∈ R<sup>N×T×F</sup>, where N = 300 stocks, T = 20 days, F = 25 model features.<br/>
+Output: y ∈ R<sup>N</sup>, a rank-normalized 5-day forward return mapped to [-1, 1].<br/>
+y<sub>i</sub> = 2 · (rank<sub>i</sub> − 1)/(N − 1) − 1<br/>
+Objective: L<sub>IC</sub> = − Pearson(predicted scores, realized ranks)<br/>
+Metric: Spearman Rank IC on the held-out test set, averaged over random seeds.</div>
+<p>The rank normalization matters. A raw return target would be dominated by market-wide moves. Ranking stocks within the same day gives a cleaner question: which names should be placed above the others?</p>
+<p>The features include price ratios, log volume, daily returns, RSI, MACD histogram, Bollinger %B, normalized ATR, moving-average ratios, momentum, realized volatility, volume changes, bid-ask spread, turnover, excess return relative to the S&amp;P 500, and four quarterly fundamentals: ROE, leverage, profit margin, and log total assets.</p>
+<p>The sample runs from January 2015 to December 2025. The split is chronological: 1,918 training samples, 411 validation samples, and 412 test samples. Training uses batch size 16, a learning rate of 1e-3 with five warmup epochs, ReduceLROnPlateau on validation loss, early stopping on rolling validation IC, and gradient clipping at norm 1.0.</p>
+<h2>4. What WIRE actually does</h2>
+<p>WIRE stands for Wavelet-Induced Rotary Encodings. The name is a little broader than the implementation. In this project, the operative mechanism is specific: Laplacian spectral coordinates generate rotary attention angles.</p>
+<p>An intuitive way to think about it is seating arrangement. Suppose 300 people need seats, and the available clues are department, competition, and shared investors. People with more shared context should sit closer. WIRE tries to do the same for stocks. Each stock gets a coordinate from the graph, and that coordinate changes how its query and key vectors are rotated during attention.</p>
+<p>The backbone is a two-layer LSTM with shared weights across stocks. It turns each stock's 20-day sequence into a 64-dimensional embedding. Then two WIRE attention layers, each with four heads, process the cross-section. For stock i, its 16-dimensional spectral coordinate z<sub>i</sub> is mapped to rotary angles:</p>
+<div class="formula">θ<sub>i</sub> = z<sub>i</sub> W<sub>θ</sub>, with W<sub>θ</sub> ∈ R<sup>16×8</sup><br/>
+Q<sub>i</sub><sup>rot</sup> = RoPE(Q<sub>i</sub>, θ<sub>i</sub>)<br/>
+K<sub>i</sub><sup>rot</sup> = RoPE(K<sub>i</sub>, θ<sub>i</sub>)</div>
+<p>The attention score also receives a dynamic correlation bias:</p>
+<div class="formula">Attention = softmax(Q<sup>rot</sup>(K<sup>rot</sup>)<sup>T</sup>/√d + edge_bias · Corr)</div>
+<p><em>Corr</em> is a 60-day rolling Pearson correlation matrix denoised using the Marchenko-Pastur rule [10]. With N = 300 and T = 60, the theoretical noise edge is about 10.47, so only a limited number of signal eigenvalues remain. The model also has a learnable mixture between the pure LSTM prediction and the WIRE prediction, allowing it to fall back when graph information is unhelpful.</p>
+<h2>5. Graphs fed into the model</h2>
+<p>Three fundamental graphs were used. The sector graph links stocks in the same GICS sector. It is the most connected of the three, with 4,917 edges, density 0.110, no isolated nodes, and four connected components.</p>
+<p>The TNIC graph comes from Hoberg-Phillips text-based product-market similarity [8]. It is much thinner: 852 edges, density 0.019, 74 isolated stocks, and 45 connected components. The ownership graph links stocks with high 13F institutional-holder overlap using Jaccard similarity above the 90th percentile. It has 4,337 edges and density 0.097, but still contains 63 isolated nodes and 41 components.</p>
+<p>From each normalized Laplacian, the smallest non-zero eigenvectors are taken: five dimensions from sector, six from TNIC, and five from ownership. Concatenating them gives a 16-dimensional coordinate per stock, standardized dimension by dimension.</p>
+<figure>
+<img alt="Graph diagnostics for density, isolated nodes, and connected components" src="figures/figure2_graph_diagnostics.png"/>
+<figcaption><strong>Figure 2.</strong> Graph diagnostics. Sector is reasonably dense; TNIC and ownership have many isolated nodes and disconnected components. That creates a problem for a method based on spectral coordinates.</figcaption>
+</figure>
+<h2>6. Baselines and experiments</h2>
+<p>The experiments compare WIRE against two baselines. The first is an LSTM with 58,689 parameters. It uses no graph and predicts ranks from each stock's own history. The second is DGT, a 140,417-parameter graph Transformer using MP-denoised Pearson correlations and differential attention [4]. WIRE has 128,011 parameters, so any improvement would need to come from structure rather than from a lower parameter count.</p>
+<p>The experimental suite has five checks. First, WIRE on a dense correlation graph. Second, WIRE on the three fundamental graphs. Third, an ablation using sector only, TNIC only, ownership only, and the full 16-dimensional coordinate. Fourth, the DGT baseline. Fifth, a sensitivity test that stretches the correlation window from 60 to 1000 days.</p>
+<h2>7. Results</h2>
+<h3>7.1 Correlation WIRE: a limited and non-significant improvement</h3>
+<p>On the dense Pearson-correlation graph, WIRE reached mean IC +0.0111 ± 0.0131. The LSTM reached +0.0072 ± 0.0057. WIRE won 13 of 20 seeds, but the paired t-test p-value was 0.23. This is not strong evidence. At most, it says that WIRE can use a dense graph that is already close to the target: historical return co-movement.</p>
+<h3>7.2 Fundamental WIRE: the intended version loses</h3>
+<p>The main model, using sector, TNIC, and ownership coordinates, was worse than the LSTM. Across 20 seeds, LSTM produced +0.0101 ± 0.0085 mean IC, while WIRE produced +0.0038 ± 0.0131. LSTM won 15 seeds. WIRE won five.</p>
+<p>The attention diagnostics point in the same direction. The sector attention ratio was 0.938, close to uniform. This means the model did not pay much more attention within sector than across sector. The graph encodings were present in the model, but they were not producing a useful structural pattern.</p>
+<h3>7.3 Ablation: TNIC does the most damage</h3>
+<p>To separate disconnectedness from information quality, the ablation used a low-weight connectivity perturbation: A<sub>fixed</sub> = A + 0.001(1 − I). This makes the graph mathematically connected without giving the artificial edges much weight. It fixes the spectral decomposition problem, but it does not invent missing economic information.</p>
+<table>
+<thead><tr><th>Configuration</th><th>Spectral dims</th><th>Mean IC ± Std</th><th>p-value vs LSTM</th><th>Wins</th></tr></thead>
+<tbody>
+<tr><td>LSTM, no graph</td><td class="num">0</td><td class="num">+0.0111 ± 0.0056</td><td class="num">—</td><td class="num">—</td></tr>
+<tr><td>Sector only</td><td class="num">5</td><td class="num">+0.0062 ± 0.0135</td><td class="num">0.391</td><td class="num">5/10</td></tr>
+<tr><td>TNIC only</td><td class="num">6</td><td class="num">−0.0010 ± 0.0109</td><td class="num">0.008</td><td class="num">1/10</td></tr>
+<tr><td>Ownership only</td><td class="num">5</td><td class="num">+0.0055 ± 0.0090</td><td class="num">0.174</td><td class="num">3/10</td></tr>
+<tr><td>Full 16D</td><td class="num">16</td><td class="num">+0.0108 ± 0.0130</td><td class="num">0.950</td><td class="num">6/10</td></tr>
+</tbody>
+</table>
+<p>The TNIC-only run gives the clearest result: −0.0010 mean IC and p = 0.008 against LSTM. Sector and ownership are also below LSTM, though not significantly. The full coordinate gets back near the LSTM, likely because sector and ownership reduce the negative effect of TNIC. However, matching the LSTM is still not an improvement.</p>
+<figure>
+<img alt="Ablation results showing IC by model configuration" src="figures/figure3_ablation.png"/>
+<figcaption><strong>Figure 3.</strong> Ablation results. TNIC-only WIRE is the worst configuration. The full multi-graph model recovers to about LSTM level but still does not beat it.</figcaption>
+</figure>
+<h3>7.4 DGT: a stronger architecture also does not beat LSTM</h3>
+<p>DGT also failed to beat LSTM. Across 20 seeds, LSTM reached +0.0101 ± 0.0085 and DGT reached +0.0084 ± 0.0159. LSTM won 11 seeds; DGT won nine. The difference was not significant. This comparison matters because DGT is not a WIRE-specific architecture. Its underperformance suggests the problem is not just one bad implementation of WIRE.</p>
+<figure>
+<img alt="DGT baseline training curves and IC across seeds" src="figures/figure6_dgt_baseline.png"/>
+<figcaption><strong>Figure 4.</strong> DGT baseline diagnostics. The larger graph Transformer does not give a stable test-IC improvement over the LSTM.</figcaption>
+</figure>
+<h3>7.5 Portfolio analysis: signal exists, but the backtest has strong assumptions</h3>
+<p>A daily long-short portfolio was also formed: long the top 30 predicted stocks and short the bottom 30. A Fama-French three-factor regression [9] produced annualized alpha of +195.5% for WIRE and +153.9% for LSTM, with alpha t-statistics of 3.25 and 2.56. R² was around 1% for both.</p>
+<p>These numbers should be handled carefully. The backtest assumes daily rebalancing, no transaction costs, no slippage, and no capacity limits. The point is diagnostic: both models appear to capture cross-sectional structure not explained by standard three-factor exposure. It is not evidence that either strategy is deployable.</p>
+<figure>
+<img alt="Long-short portfolio cumulative returns and rolling Sharpe" src="figures/figure4_portfolio.png"/>
+<figcaption><strong>Figure 5.</strong> Portfolio-level diagnostics. The long-short portfolios show theoretical alpha in a frictionless backtest, but the result is not an implementation-ready PnL claim.</figcaption>
+</figure>
+<h2>8. Why fundamental WIRE failed</h2>
+<h3>8.1 Spectral coordinates break down on disconnected graphs</h3>
+<p>WIRE needs meaningful spectral coordinates. TNIC has 45 connected components and 74 isolated nodes; ownership has 41 components and 63 isolated nodes. For a normalized Laplacian, disconnected components create multiple zero eigenvalues. Isolated nodes often collapse to indistinguishable coordinates.</p>
+<p>That means many stocks are effectively placed at the same point in graph-coordinate space. WIRE then gives them similar query/key rotations even though they are not economically identical. This is worse than having no graph at all, because the model is being given a misleading geometry.</p>
+<figure>
+<img alt="Spectral degeneracy diagnostics" src="figures/figure5_spectral_degeneracy.png"/>
+<figcaption><strong>Figure 6.</strong> Spectral degeneracy diagnostics. Multiple disconnected components create repeated zero eigenvalues. TNIC and ownership therefore produce weak or degenerate spectral positions for many stocks.</figcaption>
+</figure>
+<h3>8.2 Fundamental similarity is not the same as short-term co-movement</h3>
+<p>The second problem is conceptual. TNIC competition is a product-market relation, not a five-day return relation. Competitors can move together, but they can also move against each other when market share shifts from one firm to another. A 10-K text similarity score says that two companies describe similar businesses; it does not say their stocks should be neighbors in tomorrow's ranking.</p>
+<p>Sector has a different issue. It is real, but much of that information may already be present in returns, volatility, excess returns, and technical indicators. Ownership overlap is also slow-moving because 13F data are quarterly. The target, however, is a five-day forward rank. The time scales do not line up.</p>
+<p>The correlation graph performed better for a direct reason: it directly measures the same kind of object the target cares about, namely return co-movement. It gives a weaker economic story, but it is more aligned with the prediction task.</p>
+<h3>8.3 The signal is too weak for extra parameters</h3>
+<p>The ICs here are around 0.01. That is a weak signal. LSTM has 58,689 parameters. WIRE has 128,011. DGT has 140,417. In a weak-signal setting, extra parameters help only if the added inductive bias is right. The fundamental graphs did not provide that bias, so the larger models mostly added variance.</p>
+<h2>9. Is deep learning necessary here?</h2>
+<p>For the ranking task, deep learning remains useful. The input mixes time-series patterns, technical indicators, fundamentals, volume, and cross-sectional effects. A linear factor model would struggle to represent those interactions directly. The Fama-French regression also suggests that the LSTM and WIRE portfolios contain signal not explained by market, size, and value exposure.</p>
+<p>But the project also argues against a common reflex: adding graph deep learning is not automatically progress. Deep learning may be useful for nonlinear ranking. Graph deep learning is useful only when the graph is aligned with the target, sufficiently connected, and measured at the right time scale.</p>
+<h2>10. What to try next</h2>
+<p>One next step is cleaner supply-chain data. Compustat segment customer fields are free text and hard to map reliably to tickers. CUSIP-to-CUSIP supply-chain links, such as those available from FactSet-style data, would be more direct than TNIC text similarity and may better capture demand shocks.</p>
+<p>Another step is dynamic graph construction. The current fundamental graphs are mostly static. Institutions rebalance quarterly, TNIC updates yearly, and industry structure shifts over time. Recomputing spectral coordinates by quarter might let the model see regime changes instead of forcing one graph to explain eleven years.</p>
+<p>A third option is a larger stock universe. With only 300 stocks, TNIC leaves too many names isolated. A Russell 3000-style universe would likely improve coverage and graph density. It would require more compute, but the spectral geometry may contain more usable structure.</p>
+<h2>11. Ethics</h2>
+<p>The first issue is fairness. 13F filings and 10-K text are public in principle, but turning them into a usable trading signal requires data access, compute, and modeling expertise. If such models work, the benefits are likely to go first to institutions that already have those resources.</p>
+<p>The second issue is crowding. If many funds train similar graph-attention models, they may react to the same structural signals and trade the same clusters of stocks. During stress, that can amplify co-movement instead of simply predicting it. This work stayed in a research setting, but the risk should be stated.</p>
+<p>Finally, the portfolio numbers should not be advertised as achievable returns. They come from a frictionless backtest. Presenting them without the assumptions would be misleading.</p>
+<h2>12. Conclusion</h2>
+<p>The project began with the idea that stock relationships might improve cross-sectional ranking. The experiments led to a more specific finding. A dense correlation graph gave WIRE a slight, non-significant gain. Fundamental graphs did not help. TNIC was actively harmful in ablation. DGT, a separate graph Transformer baseline, also failed to beat LSTM.</p>
+<p>The conclusion is not that graph Transformers are useless. It is that the graph can change the model in a negative way. For short-horizon stock ranking, the graph must be connected, dynamic, and aligned with return co-movement. A graph that is easy to explain can still be the wrong structure for the model.</p>
+<h2>References</h2>
+<section class="refs">
+<p>[1] Feng, F., He, X., Wang, X., Luo, C., Liu, Y., &amp; Chua, T. S. (2019). Temporal Relational Ranking for Stock Prediction. <em>ACM TOIS</em>, 37(2), 1–30.</p>
+<p>[2] Chen, W., Zhang, Y., &amp; Li, J. (2022). Relational Stock Ranking with Graph Neural Networks. <em>Neurocomputing</em>, 488, 356–370.</p>
+<p>[3] Sawhney, R., Agarwal, S., Wadhwa, A., Derr, T., &amp; Shah, R. R. (2021). Stock Selection via Spatiotemporal Hypergraph Attention Network. <em>AAAI</em>.</p>
+<p>[4] Li, K. X. (2024). Stock Market Forecasting with Differential Graph Transformer. Stanford CS224W Final Project.</p>
+<p>[5] Dwivedi, V. P., &amp; Bresson, X. (2020). A Generalization of Transformer Networks to Graphs. AAAI Workshop on Deep Learning on Graphs.</p>
+<p>[6] Su, J., Lu, Y., Pan, S., Murtadha, A., Wen, B., &amp; Liu, Y. (2021). RoFormer: Enhanced Transformer with Rotary Position Embedding. arXiv:2104.09864.</p>
+<p>[7] Lim, D., Robinson, J., Zhao, L., Smber, T., Gao, J., &amp; Memoli, F. (2023). Sign and Basis Invariant Networks for Spectral Graph Representation Learning. <em>ICLR</em>.</p>
+<p>[8] Hoberg, G., &amp; Phillips, G. (2016). Text-Based Network Industries and Endogenous Product Differentiation. <em>Journal of Political Economy</em>, 124(5), 1423–1465.</p>
+<p>[9] Fama, E. F., &amp; French, K. R. (1993). Common Risk Factors in the Returns on Stocks and Bonds. <em>Journal of Financial Economics</em>, 33(1), 3–56.</p>
+<p>[10] Marchenko, V. A., &amp; Pastur, L. A. (1967). Distribution of Eigenvalues for Some Sets of Random Matrices. <em>Mathematics of the USSR-Sbornik</em>, 1(4), 457–483.</p>
+</section>
+<p class="note">Local submission note: this page uses only local images and inline CSS. Open <code>index.html</code> directly in Chrome to verify rendering before uploading the zip file.</p>
+</main>
+</body>
+</html>
